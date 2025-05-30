@@ -4,10 +4,12 @@ defmodule JswatchWeb.WatchUIChannel do
   def join("watch:ui", _message, socket) do
     GenServer.start_link(JswatchWeb.ClockManager, self())
     GenServer.start_link(JswatchWeb.IndigloManager, self())
+    GenServer.start_link(JswatchWeb.StopwatchManager, self())
     {:ok, socket}
   end
 
   def handle_in(event, _payload, socket) do
+    IO.inspect(event)
     :gproc.send({:p, :l, :ui_event}, String.to_atom(event))
     {:noreply, socket}
   end
@@ -24,6 +26,11 @@ defmodule JswatchWeb.WatchUIChannel do
 
   def handle_cast(:unset_indiglo, socket) do
     push(socket, "unsetIndiglo", %{})
+    {:noreply, socket}
+  end
+
+  def handle_cast(:update_alarm, socket) do
+    push(socket, "updateAlarm", %{})
     {:noreply, socket}
   end
 end
