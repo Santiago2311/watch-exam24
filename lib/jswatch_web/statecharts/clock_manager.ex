@@ -5,7 +5,7 @@ defmodule JswatchWeb.ClockManager do
     :gproc.reg({:p, :l, :ui_event})
     {_, now} = :calendar.local_time()
     current_time = Time.from_erl!(now)
-    alarm = Time.add(Time.from_erl!(now), 10)
+    alarm = Time.add(current_time, 10)
 
     Process.send_after(self(), :working_working, 1000)
 
@@ -20,85 +20,133 @@ defmodule JswatchWeb.ClockManager do
        show: false,
        count: 0,
        edit_time: nil,
-       selection: :hour,
+       selection: nil,
        button_pressed: false,
        press_timer: nil
      }}
   end
 
-  # after 1s / time += 1s transition en estado Working
+  # after 1s / time += 1s
   def handle_info(
         :working_working,
-        %{ui_pid: ui, time: time, watching_mode: :Working, mode: mode, alarm: alarm} = state
+        %{ui_pid: ui, time: time, watching_mode: watching_mode, mode: mode, alarm: alarm} = state
       ) do
     Process.send_after(self(), :working_working, 1000)
+
     time = Time.add(time, 1)
 
-    if mode == :Time do
+    show_time? =
+      case {watching_mode, mode} do
+        {:Working, _} -> true
+        {:Editing, :Alarm} -> false
+        {:Editing, :Time} -> false
+        _ -> false
+      end
+
+    if show_time? do
       GenServer.cast(ui, {:set_time_display, Time.truncate(time, :second) |> Time.to_string()})
     end
 
-    if time == alarm do
+    if time == alarm and watching_mode == :Working do
       :gproc.send({:p, :l, :ui_event}, :start_alarm)
     end
 
     {:noreply, %{state | time: time}}
   end
 
-  # bottom-right pressed transition (Working -> Waiting)
+  # bottom-right-pressed transition (Working -> Waiting) for time edition
   def handle_info(
         :"bottom-right-pressed",
         %{watching_mode: :Working, button_pressed: false} = state
       ) do
     now = System.monotonic_time(:millisecond)
-    Process.send_after(self(), {:check_press_duration, now}, 250)
+    Process.send_after(self(), {:check_press_duration, now, :time_edit}, 250)
     {:noreply, %{state | button_pressed: true, press_timer: now}}
   end
 
-  def handle_info(:"bottom-right-released", state) do
-    {:noreply, %{state | button_pressed: false, press_timer: nil}}
+  # bottom-left-pressed transition (Working -> Waiting) for alarm edition
+  def handle_info(
+        :"bottom-left-pressed",
+        %{watching_mode: :Working, button_pressed: false} = state
+      ) do
+    now = System.monotonic_time(:millisecond)
+    Process.send_after(self(), {:check_press_duration, now, :alarm_edit}, 250)
+    {:noreply, %{state | button_pressed: true, press_timer: now}}
   end
+
+  def handle_info(:"bottom-right-released", state),
+    do: {:noreply, %{state | button_pressed: false, press_timer: nil}}
+
+  def handle_info(:"bottom-left-released", state),
+    do: {:noreply, %{state | button_pressed: false, press_timer: nil}}
 
   # after 250 ms transition (Waiting -> Editing)
   def handle_info(
-        {:check_press_duration, press_start},
+        {:check_press_duration, press_start, edit_type},
         %{
           button_pressed: true,
           press_timer: press_start,
           watching_mode: :Working,
           time: time,
+          alarm: alarm,
           ui_pid: ui
-        } =
-          state
+        } = state
       ) do
-    case :gproc.lookup_values({:p, :l, :stopwatch_running}) do
-      [] ->
+    stopwatch_active =
+      case :gproc.lookup_values({:p, :l, :stopwatch_running}) do
+        [] -> false
+        _ -> true
+      end
+
+    if stopwatch_active do
+      IO.inspect("No se puede editar mientras el cronómetro está activo")
+      {:noreply, state}
+    else
+      if :gproc.lookup_values({:p, :l, :edit_mode}) == [] do
         :gproc.reg({:p, :l, :edit_mode})
-        IO.inspect("Entrando a modo edición")
-        GenServer.cast(ui, {:set_time_display, "EDITING"})
-        Process.send_after(self(), :editing_blink, 250)
+      end
 
-        {:noreply,
-         %{
-           state
-           | # st -> watching_mode
-             watching_mode: :Editing,
-             selection: :hour,
-             show: true,
-             count: 0,
-             edit_time: time,
-             last_click: nil
-         }}
+      case edit_type do
+        :time_edit ->
+          IO.inspect("Entrando a modo edición tiempo")
+          GenServer.cast(ui, {:set_time_display, "EDITING"})
+          Process.send_after(self(), :editing_blink, 250)
 
-      _ ->
-        IO.inspect("No se puede editar mientras el cronómetro está activo")
-        {:noreply, state}
+          {:noreply,
+           %{
+             state
+             | # st -> watching_mode
+               watching_mode: :Editing,
+               mode: :Time,
+               selection: :hour,
+               show: true,
+               count: 0,
+               edit_time: time,
+               last_click: nil
+           }}
+
+        :alarm_edit ->
+          IO.inspect("Entrando a modo edición alarma")
+          GenServer.cast(ui, {:set_time_display, "EDIT ALARM"})
+          Process.send_after(self(), :editing_blink, 250)
+
+          {:noreply,
+           %{
+             state
+             | # st -> watching_mode
+               watching_mode: :Editing,
+               mode: :Alarm,
+               selection: :hour,
+               show: true,
+               count: 0,
+               edit_time: alarm,
+               last_click: nil
+           }}
+      end
     end
   end
 
-  def handle_info({:check_press_duration, _}, state), do: {:noreply, state}
-
-  # after 250 ms blink transition en estado Editing
+  # after 250 ms blink transition - Blinking in editing
   def handle_info(
         :editing_blink,
         %{
@@ -133,7 +181,7 @@ defmodule JswatchWeb.ClockManager do
     end
   end
 
-  # bottom-right transition para cambiar selección en modo Editing
+  # bottom-right transition - Change selection during editing
   def handle_info(
         :"bottom-right-pressed",
         %{watching_mode: :Editing, selection: selection} = state
@@ -148,7 +196,7 @@ defmodule JswatchWeb.ClockManager do
     {:noreply, %{state | selection: new_selection, count: 0}}
   end
 
-  # bottom-left transition para incrementar tiempo en modo Editing
+  # bottom-left transition - Increment time in editing
   def handle_info(
         :"bottom-left-pressed",
         %{watching_mode: :Editing, edit_time: edit_time, selection: selection, ui_pid: ui} = state
@@ -158,26 +206,42 @@ defmodule JswatchWeb.ClockManager do
     {:noreply, %{state | edit_time: new_edit_time, count: 0}}
   end
 
-  # [count == 20] / raise(resume-clock) transition (Editing -> Working)
+  # [count == 20] / raise(resume-clock) transition (Editing -> Working) with alarm support
   def handle_info(
         :exit_editing,
-        %{watching_mode: :Editing, edit_time: edit_time, ui_pid: ui} = state
+        %{watching_mode: :Editing, edit_time: edit_time, ui_pid: ui, mode: mode} = state
       ) do
     GenServer.cast(ui, {:set_time_display, Time.to_string(edit_time)})
-    Process.send_after(self(), :working_working, 1000)
     :gproc.unreg({:p, :l, :edit_mode})
 
-    {:noreply,
-     %{
-       state
-       | # st -> watching_mode
-         watching_mode: :Working,
-         time: edit_time,
-         edit_time: nil,
-         selection: nil,
-         show: false,
-         count: 0
-     }}
+    new_state =
+      case mode do
+        :Time ->
+          %{
+            state
+            | watching_mode: :Working,
+              time: edit_time,
+              edit_time: nil,
+              selection: nil,
+              show: false,
+              count: 0,
+              mode: :Time
+          }
+
+        :Alarm ->
+          %{
+            state
+            | watching_mode: :Working,
+              alarm: edit_time,
+              edit_time: nil,
+              selection: nil,
+              show: false,
+              count: 0,
+              mode: :Time
+          }
+      end
+
+    {:noreply, new_state}
   end
 
   def handle_info(_event, state), do: {:noreply, state}
