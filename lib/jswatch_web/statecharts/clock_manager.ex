@@ -74,8 +74,47 @@ defmodule JswatchWeb.ClockManager do
     {:noreply, %{state | button_pressed: true, press_timer: now}}
   end
 
-  def handle_info(:"bottom-right-released", state),
-    do: {:noreply, %{state | button_pressed: false, press_timer: nil}}
+  # bottom-right transition - Change selection during editing
+  def handle_info(
+        :"bottom-right-pressed",
+        %{watching_mode: :Editing, selection: selection} = state
+      ) do
+    new_selection =
+      case selection do
+        :hour -> :minute
+        :minute -> :second
+        :second -> :hour
+      end
+
+    {:noreply, %{state | selection: new_selection, count: 0}}
+  end
+
+  # bottom-left transition - Increment time in editing
+  def handle_info(
+        :"bottom-left-pressed",
+        %{watching_mode: :Editing, edit_time: edit_time, selection: selection, ui_pid: ui} = state
+      ) do
+    new_edit_time = increment_time(edit_time, selection)
+    GenServer.cast(ui, {:set_time_display, Time.to_string(new_edit_time)})
+    {:noreply, %{state | edit_time: new_edit_time, count: 0}}
+  end
+
+  def handle_info(:"bottom-right-released", state) do
+    case state do
+      %{watching_mode: :Working, button_pressed: true, press_timer: press_timer}
+      when press_timer != nil ->
+        duration = System.monotonic_time(:millisecond) - press_timer
+
+        if duration < 200 do
+          :gproc.send({:p, :l, :ui_event}, :stopwatch_toggle)
+        end
+
+        {:noreply, %{state | button_pressed: false, press_timer: nil}}
+
+      _ ->
+        {:noreply, %{state | button_pressed: false, press_timer: nil}}
+    end
+  end
 
   def handle_info(:"bottom-left-released", state),
     do: {:noreply, %{state | button_pressed: false, press_timer: nil}}
@@ -115,8 +154,7 @@ defmodule JswatchWeb.ClockManager do
           {:noreply,
            %{
              state
-             | # st -> watching_mode
-               watching_mode: :Editing,
+             | watching_mode: :Editing,
                mode: :Time,
                selection: :hour,
                show: true,
@@ -133,8 +171,7 @@ defmodule JswatchWeb.ClockManager do
           {:noreply,
            %{
              state
-             | # st -> watching_mode
-               watching_mode: :Editing,
+             | watching_mode: :Editing,
                mode: :Alarm,
                selection: :hour,
                show: true,
@@ -181,31 +218,6 @@ defmodule JswatchWeb.ClockManager do
     end
   end
 
-  # bottom-right transition - Change selection during editing
-  def handle_info(
-        :"bottom-right-pressed",
-        %{watching_mode: :Editing, selection: selection} = state
-      ) do
-    new_selection =
-      case selection do
-        :hour -> :minute
-        :minute -> :second
-        :second -> :hour
-      end
-
-    {:noreply, %{state | selection: new_selection, count: 0}}
-  end
-
-  # bottom-left transition - Increment time in editing
-  def handle_info(
-        :"bottom-left-pressed",
-        %{watching_mode: :Editing, edit_time: edit_time, selection: selection, ui_pid: ui} = state
-      ) do
-    new_edit_time = increment_time(edit_time, selection)
-    GenServer.cast(ui, {:set_time_display, Time.to_string(new_edit_time)})
-    {:noreply, %{state | edit_time: new_edit_time, count: 0}}
-  end
-
   # [count == 20] / raise(resume-clock) transition (Editing -> Working) with alarm support
   def handle_info(
         :exit_editing,
@@ -244,7 +256,53 @@ defmodule JswatchWeb.ClockManager do
     {:noreply, new_state}
   end
 
-  def handle_info(_event, state), do: {:noreply, state}
+  def handle_info(:stopwatch_toggle, state) do
+    IO.inspect("Cronómetro toggle recibido en ClockManager")
+    {:noreply, state}
+  end
+
+  def handle_info(:working_working, %{watching_mode: :Editing} = state) do
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:check_press_duration, _press_start, _edit_type},
+        %{watching_mode: :Editing} = state
+      ) do
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:check_press_duration, _press_start, _edit_type},
+        %{watching_mode: other} = state
+      )
+      when other not in [:Editing] do
+    {:noreply, state}
+  end
+
+  def handle_info(:"top-right-pressed", state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:"top-right-released", state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:"top-left-pressed", state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:"top-left-released", state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:start_alarm, state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:update_alarm, state) do
+    {:noreply, state}
+  end
 
   defp increment_time(time, :hour), do: %{time | hour: rem(time.hour + 1, 24)}
   defp increment_time(time, :minute), do: %{time | minute: rem(time.minute + 1, 60)}
